@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Group;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Http;
 
@@ -17,57 +18,111 @@ class ApiFlights extends Controller
     function getFlightsGroups()
     {
         $response = Http::get('http://prova.123milhas.net/api/flights');
+        $data = json_decode($response);
 
-        $data = json_decode($response, true);
+        $flightsCollection = collect($data);
 
-        $idGroup = 1;
-        $groups = [];
+        //separar por tarifas
+        $flightsByFares = $flightsCollection->groupBy('fare');
 
-        foreach ($data as $value) {
-            $fare = $value['fare'];
-            if (!array_key_exists($fare, $groups)) {
-                $groups[$fare] = [];
-            }
-            $groups[$fare][] = $value;
+        //separar também por tipo (ida e volta)
+        $flightsByFares = $this->groupByInboundOrOutbound($flightsByFares);
+
+        //encontrar preços iguais e combinar voos
+        $combinedFlights = collect();
+
+        foreach ($flightsByFares as $flightsByFare) {
+            $groupedOutbounds = $this->findEqualItems($flightsByFare[0], 'price');
+            $groupedinounds = $this->findEqualItems($flightsByFare[1], 'price');
+
+            $combinedFlights->push($this->combineFlights($groupedOutbounds, $groupedinounds));
         }
 
-        $groupsPriceOutbound['outbound'] = [];
-        $groupsPriceInbound['inbound'] = [];
+        //formatar dados para apresentação
+        $combinedFlightsOutput = $this->formatOutput($combinedFlights);
 
-        foreach ($groups as $key => $group) {
-            $groupsAux[$key] = [];
+        $combinedFlightsOutput['flights'] = $flightsCollection;
+        $combinedFlightsOutput['groups'] = $combinedFlightsOutput['groups']->sortBy('totalPrice');
 
-            // foreach ($group as $keyGroup => $flight) {
-            //     if ($flight['outbound'] == 1) {
-            //         $price = $flight['price'];
-            //         if (!array_key_exists($price, $groupsPriceOutbound['outbound'])) {
-            //             $groupsPriceOutbound['outbound'][$price] = [];
-            //         }
-            //         $groupsPriceOutbound['outbound'][$price][] = $flight;
-            //     } else {
-            //         $price = $flight['price'];
-            //         if (!array_key_exists($price, $groupsPriceInbound['inbound'])) {
-            //             $groupsPriceInbound['inbound'][$price] = [];
-            //         }
-            //         $groupsPriceInbound['inbound'][$price][] = $flight;
-            //     }
-            // }
+        // dump($combinedFlightsOutput);
+        return response($combinedFlightsOutput, 200);
+    }
 
-            foreach ($group as $keyGroup => $flight) {
-                if ($flight['outbound'] == 1) {
-                    $groupsPriceOutbound['outbound'][] = $flight;
-                } else {
-                    $groupsPriceInbound['inbound'][] = $flight;
+    function findEqualItems($items, $field)
+    {
+        $equalItems = collect();
+        foreach ($items as $item) {
+            $equal = $items->where($field, $item->{$field});
+            if ($equal->isNotEmpty()) {
+                $equalItems->push($equal);
+
+                foreach ($equal as $item)
+                    $items = $items->reject($item, function ($collectionItem, $item) {
+                        return $collectionItem->{$field} == $item->{$field};
+                    });
+
+                $equal = null;
+            }
+        }
+
+        return $equalItems;
+    }
+
+    function combineFlights($idas, $voltas)
+    {
+        $groups = collect();
+
+        foreach ($idas as $keyIda => $ida) {
+
+            foreach ($voltas as $keyVolta => $volta) {
+                $group = new Group();
+                $group->outbound = $ida;
+                $group->inbound = $volta;
+                $group->getTotalPrice();
+                $groups = $groups->push($group);
+            }
+        }
+
+        return $groups;
+    }
+
+    function formatOutput($combinedFlights)
+    {
+        $combinedFlightsOutput = collect();
+        $combinedFlightsOutput['flights'] = null;
+        $combinedFlightsOutput['groups'] =  collect();
+        $combinedFlightsOutput['totalGroups'] = 0; // quantidade total de grupos
+        $combinedFlightsOutput['totalFlights'] = 0; // quantidade total de voos únicos
+        $combinedFlightsOutput['cheapestPrice'] = 0.0; // preço do grupo mais barato
+        $combinedFlightsOutput['cheapestGroup'] = null; // id único do grupo mais barato
+
+        foreach ($combinedFlights as $combinedFlight) {
+            $combinedFlightsOutput['totalGroups'] += $combinedFlight->count();
+            foreach ($combinedFlight as $combinedFlightGroup) {
+                $combinedFlightsOutput['groups']->push($combinedFlightGroup);
+
+                if (($combinedFlightGroup->outbound->count() == 1) && ($combinedFlightGroup->inbound->count() == 1)) {
+                    $combinedFlightsOutput['totalFlights'] += 1;
                 }
             }
         }
 
+        $combinedFlightsOutput['cheapestPrice'] = $combinedFlightsOutput['groups']->min('totalPrice');
+        $combinedFlightsOutput['cheapestGroup'] = $combinedFlightsOutput['groups']
+            ->where(
+                'totalPrice',
+                $combinedFlightsOutput['cheapestPrice']
+            )[0]
+            ->uniqueId;
+        return $combinedFlightsOutput;
+    }
 
-        dump($groupsPriceOutbound);
-        dump($groupsPriceInbound);
-        // dump($groups);
-        dump($groupsAux);
+    function groupByInboundOrOutbound($flights)
+    {
+        foreach ($flights as $key => $flight) {
+            $flights[$key] = $flights[$key]->groupBy('inbound');
+        }
 
-        // return $response->json();
+        return $flights;
     }
 }
